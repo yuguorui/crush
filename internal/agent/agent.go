@@ -168,6 +168,47 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		return nil, fmt.Errorf("failed to get session messages: %w", err)
 	}
 
+	// Check if session exceeds current model's context window before proceeding
+	if !a.disableAutoSummarize {
+		cw := int64(a.largeModel.CatwalkCfg.ContextWindow)
+		totalTokens := currentSession.CompletionTokens + currentSession.PromptTokens
+		remaining := cw - totalTokens
+		var threshold int64
+		if cw > 200_000 {
+			threshold = 20_000
+		} else {
+			threshold = int64(float64(cw) * 0.2)
+		}
+
+		if remaining <= threshold {
+			// Session exceeds or is close to exceeding context window
+			// Trigger summarization before proceeding with the current request
+			slog.Info("session exceeds context window threshold, triggering summarization",
+				"session_id", call.SessionID,
+				"total_tokens", totalTokens,
+				"context_window", cw,
+				"remaining", remaining,
+				"threshold", threshold)
+
+			if err := a.Summarize(ctx, call.SessionID, call.ProviderOptions); err != nil {
+				slog.Error("failed to summarize session before processing request",
+					"session_id", call.SessionID,
+					"error", err)
+				// Continue anyway, the agent might still work
+			} else {
+				// After summarization, refresh session and messages
+				currentSession, err = a.sessions.Get(ctx, call.SessionID)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get session after summarization: %w", err)
+				}
+				msgs, err = a.getSessionMessages(ctx, currentSession)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get session messages after summarization: %w", err)
+				}
+			}
+		}
+	}
+
 	var wg sync.WaitGroup
 	// Generate title if first message.
 	if len(msgs) == 0 {
