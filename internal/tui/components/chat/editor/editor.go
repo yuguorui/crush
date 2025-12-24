@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"os"
@@ -171,6 +172,17 @@ func (m *editorCmp) repositionCompletions() tea.Msg {
 func (m *editorCmp) Update(msg tea.Msg) (util.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	var cmds []tea.Cmd
+
+	// Debug: Log all messages received
+	if m.app != nil && m.app.Config != nil && m.app.Config().Options.Debug {
+		slog.Debug("Editor received message",
+			"type", fmt.Sprintf("%T", msg),
+			"isCompletionsOpen", m.isCompletionsOpen,
+			"focused", m.textarea.Focused(),
+			"deleteMode", m.deleteMode,
+			"attachments", len(m.attachments))
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		return m, m.repositionCompletions
@@ -178,13 +190,29 @@ func (m *editorCmp) Update(msg tea.Msg) (util.Model, tea.Cmd) {
 		m.attachments = append(m.attachments, msg.Attachment)
 		return m, nil
 	case completions.CompletionsOpenedMsg:
+		if m.app != nil && m.app.Config != nil && m.app.Config().Options.Debug {
+			cursor := m.textarea.Cursor()
+			slog.Debug("CompletionsOpenedMsg received",
+				"before_state", m.isCompletionsOpen,
+				"cursor_row", cursor.Y,
+				"cursor_col", cursor.X)
+		}
 		m.isCompletionsOpen = true
+		return m, nil
 	case completions.CompletionsClosedMsg:
+		if m.app != nil && m.app.Config != nil && m.app.Config().Options.Debug {
+			slog.Debug("CompletionsClosedMsg received",
+				"before_state", m.isCompletionsOpen)
+		}
 		m.isCompletionsOpen = false
 		m.currentQuery = ""
 		m.completionsStartIndex = 0
+		return m, nil
 	case completions.SelectCompletionMsg:
 		if !m.isCompletionsOpen {
+			if m.app != nil && m.app.Config != nil && m.app.Config().Options.Debug {
+				slog.Debug("SelectCompletionMsg ignored - completions not open")
+			}
 			return m, nil
 		}
 		if item, ok := msg.Value.(FileCompletionItem); ok {
@@ -214,6 +242,7 @@ func (m *editorCmp) Update(msg tea.Msg) (util.Model, tea.Cmd) {
 				Content:  content,
 			})
 		}
+		return m, nil
 
 	case commands.OpenExternalEditorMsg:
 		if m.app.AgentCoordinator.IsSessionBusy(m.session.ID) {
@@ -223,6 +252,7 @@ func (m *editorCmp) Update(msg tea.Msg) (util.Model, tea.Cmd) {
 	case OpenEditorMsg:
 		m.textarea.SetValue(msg.Text)
 		m.textarea.MoveToEnd()
+		return m, nil
 	case tea.PasteMsg:
 		content, path, err := pasteToFile(msg)
 		if errors.Is(err, errNotAFile) {
@@ -268,11 +298,23 @@ func (m *editorCmp) Update(msg tea.Msg) (util.Model, tea.Cmd) {
 		case msg.String() == "@" && !m.isCompletionsOpen &&
 			// only show if beginning of prompt, or if previous char is a space or newline:
 			(len(m.textarea.Value()) == 0 || unicode.IsSpace(rune(m.textarea.Value()[len(m.textarea.Value())-1]))):
+			if m.app != nil && m.app.Config != nil && m.app.Config().Options.Debug {
+				slog.Debug("Opening completions with @",
+					"word", "@",
+					"cursor_idx", curIdx,
+					"textarea_value_len", len(m.textarea.Value()))
+			}
 			m.isCompletionsOpen = true
 			m.currentQuery = ""
 			m.completionsStartIndex = curIdx
 			cmds = append(cmds, m.startCompletions)
 		case m.isCompletionsOpen && curIdx <= m.completionsStartIndex:
+			if m.app != nil && m.app.Config != nil && m.app.Config().Options.Debug {
+				slog.Debug("Closing completions due to cursor position",
+					"curIdx", curIdx,
+					"completionsStartIndex", m.completionsStartIndex,
+					"word", m.textarea.Word())
+			}
 			cmds = append(cmds, util.CmdHandler(completions.CloseCompletionsMsg{}))
 		}
 		if key.Matches(msg, DeleteKeyMaps.AttachmentDeleteMode) {
@@ -327,6 +369,22 @@ func (m *editorCmp) Update(msg tea.Msg) (util.Model, tea.Cmd) {
 	m.textarea, cmd = m.textarea.Update(msg)
 	cmds = append(cmds, cmd)
 
+	// Log textarea state after keypress (debug mode only)
+	if m.app != nil && m.app.Config != nil && m.app.Config().Options.Debug {
+		if kp, ok := msg.(tea.KeyPressMsg); ok {
+			cursor := m.textarea.Cursor()
+			value := m.textarea.Value()
+			slog.Debug("Editor: Keypress processed",
+				"key", kp.String(),
+				"cursor_row", cursor.Y,
+				"cursor_col", cursor.X,
+				"value_len", len(value),
+				"focused", m.textarea.Focused(),
+				"isCompletionsOpen", m.isCompletionsOpen,
+				"deleteMode", m.deleteMode)
+		}
+	}
+
 	if m.textarea.Focused() {
 		kp, ok := msg.(tea.KeyPressMsg)
 		if ok {
@@ -360,6 +418,21 @@ func (m *editorCmp) Update(msg tea.Msg) (util.Model, tea.Cmd) {
 				}
 			}
 		}
+	}
+
+	// Detect potential state inconsistencies
+	if m.app != nil && m.app.Config != nil && m.app.Config().Options.Debug {
+		if m.isCompletionsOpen && len(m.textarea.Value()) == 0 {
+			slog.Warn("Editor: Completions open but textarea is empty - possible state inconsistency")
+		}
+		if !m.textarea.Focused() && m.isCompletionsOpen {
+			slog.Warn("Editor: Completions open but textarea not focused")
+		}
+		slog.Debug("Editor Update returning",
+			"isCompletionsOpen", m.isCompletionsOpen,
+			"attachments", len(m.attachments),
+			"deleteMode", m.deleteMode,
+			"focused", m.textarea.Focused())
 	}
 
 	return m, tea.Batch(cmds...)
