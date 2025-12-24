@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/fantasy"
@@ -135,6 +136,7 @@ type Message struct {
 	CreatedAt        int64
 	UpdatedAt        int64
 	IsSummaryMessage bool
+	lock             sync.Mutex
 }
 
 func (m *Message) Content() TextContent {
@@ -230,6 +232,9 @@ func (m *Message) IsThinking() bool {
 }
 
 func (m *Message) AppendContent(delta string) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
 	found := false
 	for i, part := range m.Parts {
 		if c, ok := part.(TextContent); ok {
